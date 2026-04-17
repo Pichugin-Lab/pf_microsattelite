@@ -1,0 +1,842 @@
+---
+title: "Targeted Sequencing"
+author: Elgin Akin
+date: 2026-04-17
+format: html
+---
+
+This is the most accurate count - starting from the ms metadata table!
+
+# Microsattelite
+
+## Import data
+
+Last data import: 2024-09-12
+Includes Ghana samples
+
+```{r}
+library(tidyverse)
+library(ape)
+library(adegenet)
+library(poppr)
+library(pegas)
+library(igraph)
+
+theme_set(theme_minimal(base_family = "helvetica"))
+
+# old 
+#region_colors <- c( 
+#                  "Thailand" = "#003A59", 
+#                  "Cambodia" = "#003A59", 
+#                  "Columbia" = "#416322FF", 
+#                  "Ghana" = "#A1378B",
+#                  "Kenya" = "#FF5800"
+#                 )
+
+# updated colors for clarity
+region_colors <- c( 
+                  "Thailand" = "#EE4C97FF", 
+                  "Cambodia" = "#EE4C97FF", 
+                  "Colombia" = "#20854EFF", 
+                  "Ghana" = "#0072B5FF",
+                  "Kenya" = "#FF5800"
+                 )
+
+
+
+clone="#54bebe" 
+original="#c80064"
+```
+
+
+```{r}
+# Load the CSV file
+msdf = read_csv('data/20240726_ms_data.csv')
+
+msdf <- msdf |> 
+  mutate(across(where(is.character), ~ na_if(., "RERUN")))
+
+# metadata: Create 'country' and 'passage_history' columns with the specified logic from the master dataframe
+msdf_metadata <- msdf |> 
+  mutate(
+    # Populate country based on the Sample column and reference names
+    country = case_when(
+      str_detect(str_to_lower(Sample), "3d7|7g8|fvo|nf54|dd2") ~ "reference",  # Case-insensitive check for reference names
+      str_starts(Sample, "K") ~ "Kenya",
+      str_starts(Sample, "G") ~ "Ghana",
+      str_starts(Sample, "C") ~ "Colombia",
+      str_starts(Sample, "T") ~ "Thailand",
+      TRUE ~ "unknown"  # Default case
+    ),
+    
+    # Populate passage_history based on the Sample naming convention
+    passage_history = case_when(
+      str_detect(str_to_lower(Sample), "cloned") ~ "clone",  # Case-insensitive check for "Cloned"
+      str_detect(str_to_lower(Sample), "original vial") ~ "original",  # Case-insensitive check for "Original vial"
+      str_detect(Sample, "-") ~ "clone",  # Contains a dash
+      !str_detect(Sample, "-|cloned|original vial") ~ "original",  # No dash, additional strings
+      TRUE ~ "unknown"  # Default case
+    )
+  )
+
+# filter metadata: 
+msdf_filter = msdf |> 
+  drop_na(Sample) |>  # Drop NA values in Sample column
+  filter(`Poly-A` != "POLYCLONAL") |>  # Drop rows where Poly-A is POLYCLONAL
+  select(-`AMA1 Sequenced`, -`MSP1 Sequenced`, -`MSP2 Sequenced`, -`CSP Fullgene Sequenced`, -`Additional Notes`)  # Drop specified columns
+
+# intersect metadata to be with filtered dataset
+msdf_metadata_filtered = inner_join(msdf_metadata, msdf_filter, by = "Sample") #|> select(all_of(colnames(msdf_metadata)))  # Keep only the columns in msdf_metadata
+
+# Add the country column to msdf_filter from msdf_metadata_filtered since adegenet and poppr can inpute a group assignment 
+msdf_filter <- msdf_filter |> 
+  left_join(select(msdf_metadata_filtered, Sample, country), by = "Sample")
+
+# final data frames
+
+msdf_metadata # use for general statistics 
+msdf_metadata_filtered # use for filtered msdf
+msdf_filter # filtered msdf
+
+```
+
+## Metadata Stats
+
+-   sample by country distribution.
+-   ? monoclonal to polyclonal as detected by ms
+-   upset plot microsattelite intersect with sequences
+
+## Microsatelite Processing
+
+-   convert filtered ms df to geneid object
+-   general stats with poppr
+-   breakdown of "clones" by country origin - 4 donut charts
+
+## Import Microsattelite Data
+
+```{r}
+pfms <- df2genind(
+  X=msdf_filter[,c(2:13)], 
+  ind.names= msdf_filter$Sample,
+  pop=msdf_filter$country,
+  NA.char="0",
+  sep = ",",
+  type = "codom", 
+  ploidy = 1
+)
+```
+
+## poppr population diversity statistics
+
+```{r}
+# Load necessary libraries
+library(gt)
+library(ggplot2)
+library(dplyr)
+
+# Your poppr function call
+df_poppr = poppr(
+  pfms,
+  total = TRUE,
+  sublist = "ALL",
+  exclude = NULL,
+  blacklist = NULL,
+  sample = 0,
+  method = 1,
+  missing = "ignore",
+  cutoff = 0.05,
+  quiet = FALSE,
+  clonecorrect = FALSE,
+  strata = 1,
+  keep = 1,
+  plot = TRUE,
+  hist = TRUE,
+  index = "rbarD",
+  minsamp = 10,
+  legend = FALSE
+)
+
+# Print the poppr output
+print(df_poppr)
+
+# --- Plot the poppr output table using gt
+
+# Create a gt table, filtering out the 'File', 'MLG', 'eMLG', and 'SE' columns
+gt_table <- df_poppr %>%
+  select(-c(File, MLG, eMLG, SE)) %>%  # Remove the 'File', 'MLG', 'eMLG', and 'SE' columns
+  gt() %>%
+  tab_header(
+    title = "Microsatellite Diversity by Population "
+  ) %>%
+  cols_label(
+    Pop = "Population",
+    N = "Sample Size (N)",
+    H = "Shannon-Weiner Diversity Index (H)",
+    G = "Stoddard-Taylor's Index (G)",
+    lambda = "Simpson's Index (λ)",
+    E.5 = "Evenness (E.5)",
+    Hexp = "Expected Heterozygosity (Hexp)",
+    Ia = "Index of Association (Ia)",
+    rbarD = "Standardized Index of Association (rbarD)"
+  ) %>%
+  fmt_number(
+    columns = vars(N, H, G, lambda, E.5, Hexp, Ia, rbarD),
+    decimals = 2
+  ) %>%
+  tab_options(
+    table.width = pct(100),  # Set table width to 100%
+    table.border.top.color = "black",
+    table.border.bottom.color = "black",
+    column_labels.border.top.color = "black",
+    column_labels.border.bottom.color = "black"
+  ) %>%
+  cols_align(
+    align = "center",
+    columns = everything()
+  )
+
+# Print the gt table
+print(gt_table)
+
+# Save the gt table to an HTML file for larger viewing
+gtsave(gt_table, "population_statistics.html")
+
+
+```
+
+## Locus Specific Descriptors
+
+```{r}
+library(gt)
+library(dplyr)
+
+# --- Plot population totals
+region_colors <- c( 
+                  "Thailand" = "#EE4C97FF", 
+                  "Cambodia" = "#EE4C97FF", 
+                  "Colombia" = "#20854EFF", 
+                  "Ghana" = "#0072B5FF",
+                  "Kenya" = "#FF5800"
+                 )
+
+# Create locus tables for each population
+locus_table_kenya <- locus_table(
+  pfms,
+  population = "Kenya",
+  index = "simpson",
+  lev = "allele",
+  information = TRUE
+)
+
+locus_table_ghana <- locus_table(
+  pfms,
+  population = "Ghana",
+  index = "simpson",
+  lev = "allele",
+  information = TRUE
+)
+
+locus_table_thailand <- locus_table(
+  pfms,
+  population = "Thailand",
+  index = "simpson",
+  lev = "allele",
+  information = TRUE
+)
+
+locus_table_colombia <- locus_table(
+  pfms,
+  population = "Colombia",
+  index = "simpson",
+  lev = "allele",
+  information = TRUE
+)
+
+# ------------- Plot 
+
+# Assuming the locus_table functions have already been executed for each population:
+# locus_table_kenya, locus_table_ghana, locus_table_thailand, locus_table_colombia
+
+# Create the alleles_combined dataframe
+alleles_combined <- data.frame(
+  Locus = rownames(locus_table_kenya),  # Ensure locus names are extracted properly
+  Kenya = as.integer(locus_table_kenya[, "allele"]),
+  Ghana = as.integer(locus_table_ghana[, "allele"]),
+  Thailand = as.integer(locus_table_thailand[, "allele"]),
+  Colombia = as.integer(locus_table_colombia[, "allele"])
+)
+
+library(ggplot2)
+library(tidyr)
+
+# Reshape the dataframe for easier plotting
+alleles_long <- alleles_combined %>%
+  pivot_longer(cols = -Locus, names_to = "Population", values_to = "Allele_Count")
+
+# Create a bar plot
+ggplot(alleles_long, aes(x = Locus, y = Allele_Count, fill = Population)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Allele Counts by Locus and Population",
+       x = "Microsatellite Locus",
+       y = "Unique Alleles ") +
+  theme_minimal() +
+  scale_fill_manual(values = c("Kenya" = "#FF5800",
+                                "Ghana" = "#0072B5FF", 
+                                "Thailand" = "#EE4C97FF", 
+                                "Colombia" = "#20854EFF" ))  # Customize colors as needed
+
+
+
+
+# ------------- Generate a gt table 
+
+library(gt)
+library(dplyr)
+library(scales)
+
+# Create the gt table
+alleles_gt_table <- alleles_combined %>%
+  gt() %>%
+  tab_header(
+    title = "Unique Alleles by Locus"
+  ) %>%
+  cols_label(
+    Locus = "Locus",
+    Kenya = "Kenya",
+    Ghana = "Ghana",
+    Thailand = "Thailand",
+    Colombia = "Colombia"
+  ) %>%
+  fmt_number(
+    columns = everything(),
+    decimals = 0  # Ensure no decimal places
+  )
+
+# Print the gt table
+print(alleles_gt_table)
+
+```
+
+## minimum spanning network
+
+https://grunwaldlab.github.io/poppr/reference/poppr.msn.html
+
+```{r}
+library("igraph") #install if not already installed
+
+adist <- diss.dist(pfms, percent = TRUE) # calculate dissimilarity matrix
+amsn <- poppr.msn(pfms, adist, showplot = TRUE ) # plot default msn
+
+set.seed(500) # set random seed for network shape 
+
+#open 
+msn.p <- plot_poppr_msn(pfms, amsn, gadj = 15, layfun = layout_with_kk, vertex.label = NA) # plot
+```
+
+```{r}
+adist <- diss.dist(pfms, percent = TRUE) # calculate dissimilarity matrix
+amsn <- poppr.msn(pfms, adist, showplot = TRUE ) # plot default msn
+
+set.seed(500) # set random seed for network shape 
+
+values = c("Kenya" = "#FF5800", 
+                                "Ghana" = "#A1378B", 
+                                "Thailand" = "#003A59", 
+                                "Colombia" = "#416322FF")
+
+msn.p_ghana <- plot_poppr_msn(pfms, 
+                        amsn, 
+                        gadj = 5,
+                        layfun = layout_as_tree , #layout_with_kk
+                        mgl=TRUE,
+                        palette = "terrain.colors") # plot
+
+```
+
+```{r}
+library(poppr)
+library(ggplot2)
+
+# Calculate dissimilarity matrix
+adist <- diss.dist(pfms, percent = TRUE)
+
+# Generate the minimum spanning network (MSN)
+amsn <- poppr.msn(pfms, adist, showplot = FALSE)
+
+# Set the random seed for reproducibility
+set.seed(500)
+
+# Define the custom colors without names
+colors <- c("#FF5800",  # Kenya
+            "#A1378B",  # Ghana
+            "#003A59",  # Thailand
+            "#416322FF") # Colombia
+
+# Define population labels corresponding to colors
+populations <- c("Kenya", "Ghana", "Thailand", "Colombia")
+
+# Plot the minimum spanning network with custom colors
+msn.p_ghana <- plot_poppr_msn(
+  pfms, 
+  amsn, 
+  gadj = 5,
+  layfun = layout_as_tree,  # Use tree layout
+  mgl = TRUE,
+  vertex.color = colors,# Assign the custom colors to vertices
+  inds = "reference"
+)
+
+# Display the plot
+print(msn.p_ghana)
+
+# Add a legend with specific x and y coordinates
+legend(x = 0.1,  # X coordinate (10% from the left)
+       y = 1.1,  # Y coordinate (90% from the bottom)
+       legend = populations, 
+       fill = colors, 
+       title = "Population", 
+       bty = "n",  # No box around the legend
+       cex = 0.8)  # Adjust the text size
+
+```
+
+specific labels
+
+```{r}
+library(poppr)
+library(igraph)  # Make sure to load igraph for layout functions
+
+# Calculate dissimilarity matrix
+adist <- diss.dist(pfms, percent = TRUE)
+
+# Generate the minimum spanning network (MSN) and ensure it's a graph object
+amsn <- poppr.msn(pfms, adist, showplot = FALSE)
+
+# Set the random seed for reproducibility
+set.seed(500)
+
+# Define the custom colors
+colors <- c("#FF5800",  # Kenya
+            "#A1378B",  # Ghana
+            "#003A59",  # Thailand
+            "#416322FF") # Colombia
+
+# Define population labels corresponding to colors
+populations <- c("Kenya", "Ghana", "Thailand", "Colombia")
+
+# Plot the minimum spanning network with custom colors
+msn.p_ghana <- plot_poppr_msn(
+  pfms, 
+  amsn, 
+  gadj = 5,
+  layfun = layout_as_tree,  # Use tree layout
+  mgl = TRUE,
+  vertex.color = colors # Assign the custom colors to vertices
+)
+
+# Display the plot
+print(msn.p_ghana)
+
+
+```
+
+## Diagnostic: genotype accumulation curve
+
+> Genotype accumulation curves are useful for determining the minimum number of loci necessary to discriminate between individuals in a population. This function will randomly sample loci without replacement and count the number of multilocus genotypes observed.
+
+```{r}
+library(tidyverse)
+
+# Plot the genotype curve
+genotype_curve(
+  pfms, #import genalex imported file 
+  sample = 100,
+  #maxloci = 0L,
+  quiet = FALSE,
+  plot = TRUE,
+  drop = FALSE, # TRUE removes monomorphic loci 
+  dropna = TRUE # No missing sites
+)
+
+
+#p_gc <- last_plot() # call in last plot 
+#p_gc + geom_smooth() + 
+ # theme_bw() + 
+  #theme(text = element_text(size = 12, family = "serif")) +
+  #theme(title = element_text(size = 14)) +
+  #ggtitle("Genotype Accumulation Curve for Kenyan Clones", "12 Microsattelite Markers")
+ 
+#`geom_smooth()` using method = 'gam' and formula 'y ~ s(x, bs = "cs")'
+
+```
+
+For our example dataset, it looks like we only need 10 loci to describe the full diversity in our population.
+
+## Adegenet Interactive Server
+
+From: https://adegenet.r-forge.r-project.org/files/PRstats/practical-MVAintro.1.0.pdf
+
+```{r}
+#adegenetServer(what = "DAPC")
+```
+
+## DPAC Analysis
+
+To start we will be performing descriminant principle component analysis from the [DPAC](https://github.com/thibautjombart/adegenet/raw/master/tutorials/tutorial-dapc.pdf) tutorial.
+
+We will use the same data as before and convert the `genclone` object to a `genid` object for use in adegenet
+
+```{r}
+# convert pfms to gen ID 
+#pfms.gid <- genclone2genind(pfms)
+
+pfms.gid <- pfms
+```
+
+## Find Clusters
+
+specify 2 PCs and 5 Clusters
+
+```{r}
+#| eval: false 
+clust <- find.clusters(pfms.gid, max.n.clust=10) #requires specification of clusters and values 
+clust <- find.clusters(pfms, max.n.clust=10) #requires specification of clusters and values 
+
+
+```
+
+specify 5 and 5
+
+```{r}
+
+dapc1 <- dapc(pfms, clust$clust) 
+```
+
+### Plot dapc with adegenet scatter
+
+```{r}
+myCol <- c("red",
+           "#827100",
+           "forestgreen",
+           "blue",
+           "purple",
+           "green")
+
+# Plot the DAPC scatter plot without automatic labels
+scatter(dapc1, 
+        posi.da="none",  
+        posi.pca="topleft",
+        bg="white",
+        cstar=0, 
+        col=myCol, 
+        scree.pca=TRUE,
+        cex=2,
+        solid=0.7)
+
+
+```
+
+## FINAL PCA PLOT
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+library(ggside)
+library(adegenet)
+library(ggrepel)  # For improved label placement
+library(ggforce)
+
+# Assuming dapc1 contains PCA coordinates and region assignments
+coords <- dapc1$ind.coord
+sample_ids <- rownames(coords)
+region_assignments <- dapc1$grp  # Assuming this is the region assignment
+
+# Combine the extracted data into a data frame
+dapc_data <- data.frame(
+  SampleID = sample_ids,
+  PC1 = coords[, 1],
+  PC2 = coords[, 2],
+  Region = region_assignments  # Include Region for coloring
+)
+
+# Define the specific sample IDs you want to label
+reference_ids <- c("3D7", "7G8", "Dd2", "FVO(NIH)", "NF54")
+
+# Create a new column for labels, only showing reference IDs
+dapc_data <- dapc_data %>%
+  mutate(Label = ifelse(SampleID %in% reference_ids, SampleID, ""))
+
+# Create a separate dataset for ellipses, excluding the reference IDs
+dapc_data_no_references <- dapc_data %>%
+  filter(!SampleID %in% reference_ids)
+
+# Calculate the percentage of variance explained by each PC
+variance_explained <- dapc1$pca.eig
+percent_variance_explained <- variance_explained / sum(variance_explained) * 100
+
+# Extract PC1 and PC2 percent variance explained
+pc1_variance <- round(percent_variance_explained[1], 2)  # PC1 variance
+pc2_variance <- round(percent_variance_explained[2], 2)  # PC2 variance
+
+# Define your custom color scheme
+
+country_colors <- c( 
+  "Thailand" = "#003A59", 
+  "Cambodia" = "#003A59", 
+  "Colombia" = "#416322FF", 
+  "Kenya" = "#FF5800",
+  "Ghana" = "#A1378B"
+)
+
+country_colors <- c( 
+                  "Thailand" = "#EE4C97FF", 
+                  "Cambodia" = "#EE4C97FF", 
+                  "Colombia" = "#20854EFF", 
+                  "Ghana" = "#0072B5FF",
+                  "Kenya" = "#FF5800"
+                 )
+
+# Create the base scatter plot with ggplot2
+scatter_plot <- ggplot(dapc_data, aes(x = PC1, y = PC2, fill = Region)) +
+  
+geom_mark_ellipse(data = dapc_data_no_references, 
+                  aes(fill = Region), 
+                  alpha = 0.1, 
+                  label.buffer = unit(0, "mm"),  # Ensures no buffer around label
+                  color = NA,  # Removes the outline of the ellipse
+                  expand = unit(2, "mm"),  # Relaxes the contour slightly
+                  show.legend = FALSE) +
+  
+  # Add points for all samples, including reference points, with black outlines
+  geom_point(size = 2.5, alpha = 0.7, shape = 21, color = "black") +
+  
+  # Improved label placement with ggrepel, and white background behind text for reference points
+  geom_label_repel(aes(label = Label), 
+                   size = 3, 
+                   fontface = "bold", 
+                   color = "black", 
+                   fill = "white",  # White background for labels
+                   box.padding = 0.35, 
+                   point.padding = 0.5,
+                   segment.color = "grey50",
+                   max.overlaps = 30) +
+  
+  # Minimal theme for a clean look
+  theme_bw() +  
+  labs(
+    x = paste("PC1 -", pc1_variance, "% variance explained"),
+    y = paste("PC2 -", pc2_variance, "% variance explained"),
+    color = "Region"
+  ) +
+  
+  # Apply custom color scheme
+  scale_color_manual(values = region_colors) +
+  scale_fill_manual(values = region_colors) +
+  
+  theme(
+    legend.position = "right",
+    panel.grid.major = element_blank(),  # Remove major gridlines
+    panel.grid.minor = element_blank(),  # Remove minor gridlines
+    panel.border = element_blank(),      # Remove plot border
+    axis.line = element_line(color = "black")  # Add axis lines for clarity
+)
+
+# Add marginal histograms using ggside, excluding outlines and adding back horizontal gridlines for y-side
+scatter_plot_with_margins <- scatter_plot +
+  geom_xsidehistogram(position = "stack") + 
+  geom_ysidehistogram(position = "stack") +
+  theme(
+    legend.position = c(0.65, 0.08),  # Adjust these values to position the legend
+    legend.justification = c("left", "bottom")  # Adjusts the reference point for positioning
+  )
+
+
+scatter_plot_with_margins
+
+# ---- save plot
+
+ggsave("figures/PCA.png", 
+       scatter_plot_with_margins, 
+       height=5, 
+       width=5,
+       dpi = 500)
+
+```
+
+## Loadings plot
+
+```{r}
+set.seed(4)
+contrib <- loadingplot(dapc1$var.contr, axis=2,
+thres=.07, lab.jitter=1)
+```
+
+## unsupervised clusters
+
+```{r}
+scatter(dapc1, scree.da=FALSE, bg="white", pch=20,  cell=0, cstar=0, col=myCol, solid=0.4,
+        cex=3,clab=0, leg=TRUE, txt.leg=paste("Cluster",1:5))
+```
+
+```{r}
+scatter(dapc1, ratio.pca=0.3, bg="white", pch=20,  cell=0,
+        cstar=0, col=myCol, solid=.4, cex=3, clab=0,
+        mstree=TRUE, scree.da=FALSE, posi.pca="bottomright",
+        leg=TRUE, txt.leg=paste("Cluster",1:5))
+par(xpd=TRUE)
+points(dapc1$grp.coord[,1], dapc1$grp.coord[,2], pch=4,
+       cex=3, lwd=8, col="black")
+points(dapc1$grp.coord[,1], dapc1$grp.coord[,2], pch=4,
+       cex=3, lwd=2, col=myCol)
+
+myInset <- function(){
+  temp <- dapc1$pca.eig
+  temp <- 100* cumsum(temp)/sum(temp) 
+  plot(temp, col=rep(c("black","lightgrey"),
+               c(dapc1$n.pca,1000)), ylim=c(0,100),
+         xlab="PCA axis", ylab="Cumulated variance (%)",
+         cex=1, pch=20, type="h", lwd=2)
+}
+
+
+add.scatter(myInset(), posi="bottomright",
+            inset=c(-0.03,-0.01), ratio=.28,
+            bg=transp("white"))
+```
+
+## Loading plot
+
+```{r}
+set.seed(4)
+#contrib <- loadingplot(dapc.flu$var.contr, axis=2,
+#                      thres=.07, lab.jitter=1)
+```
+
+```{r}
+scatter(dapc1,1,1, col=myCol, bg="white",
+        scree.da=FALSE, legend=TRUE, solid=.4)
+```
+
+## Population Statistics
+
+```{r}
+
+library(poppr)
+
+poppr_diversity_ci = diversity_ci(
+  pfms,
+  n = 100L,
+  n.boot = 1L,
+  ci = 95,
+  total = FALSE,
+  rarefy = FALSE,
+  n.rare = 1,
+  plot = TRUE,
+  raw = TRUE,
+  center = TRUE  
+) 
+
+poppr_plot <- last_plot()
+
+ggsave("figures/poppr_ci.svg", poppr_plot, height = 4, width = 6)
+
+poppr_diversity_ci 
+
+```
+
+## Formatted Population Statistics
+
+```{r}
+# Specify colors for each population (based on countries)
+country_colors <- c( 
+                  "Thailand" = "#EE4C97FF", 
+                  "Cambodia" = "#EE4C97FF", 
+                  "Colombia" = "#20854EFF", 
+                  "Ghana" = "#0072B5FF",
+                  "Kenya" = "#FF5800"
+                 )
+
+
+# Loop through each metric to create separate plots
+for (metric in diversity_metrics) {
+  # Subset the data for the current metric
+  metric_data <- subset(merged_df, variable == metric)
+  
+  # Create the plot for the current metric
+  p <- ggplot(metric_data, aes(x = Pop)) +
+    geom_point(aes(y = value_est, color = Pop), size = 3) +  # Estimated values
+    geom_errorbar(aes(ymin = value_obs, ymax = value_obs), width = 0.2) +  # Observed values
+    scale_color_manual(values = country_colors) +  # Use the custom population colors
+    labs(title = paste("Diversity Index Metric:", metric), x = "Population", y = metric) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+          legend.position = "bottom")  # Adjust legend position if needed
+
+  # Store the plot in the list
+  plot_list[[metric]] <- p
+}
+
+# Display all plots
+plot_list[["H"]]     # Plot for H
+plot_list[["G"]]     # Plot for G
+plot_list[["lambda"]] # Plot for lambda
+plot_list[["E.5"]]   # Plot for E.5
+
+```
+
+## Caclulate Genetic Distances 
+
+```{r}
+
+library(writexl)
+nei <- nei.dist(pfms, warning = TRUE) 
+nei_matrix <- as.matrix(nei)
+nei_df <- as.data.frame(nei_matrix)
+
+# save as csv
+#write_csv(nei_df, "results/microsattelite_nei.csv")
+# save as Excel file
+#write_xlsx(nei_df, "results/microsattelite_nei.xlsx")
+
+# Rogers Distance see https://doi.org/10.2307/2407826 and 10.4236/ajps.2016.71022  
+rogers <- rogers.dist(pfms)
+rogers_matrix <- as.matrix(rogers)
+rogers_df <- as.data.frame(rogers_matrix)
+
+# save as csv
+write_csv(rogers_df, "results/microsattelite_rogers.csv")
+# save as Excel file
+write_xlsx(rogers_df, "results/microsattelite_rogers.xlsx")
+
+
+
+
+# other distance metrics
+edwards.dist(pfms)
+reynolds.dist(pfms)
+provesti.dist(pfms)
+```
+
+# Cite Packages
+
+```{r}
+
+# Define the packages you want to cite
+packages <- c("poppr", "adegenet", "ggplot2", "seqvisr")
+
+# Function to generate citations
+generate_citations <- function(pkg) {
+  citation_info <- citation(pkg)
+  citation_text <- paste(citation_info$authors, "(", citation_info$year, ").", citation_info$title, sep = " ")
+  return(citation_text)
+}
+
+# Generate citations for all packages
+citations <- lapply(packages, generate_citations)
+
+# Print citations (you can customize the output format as needed)
+for (citation in citations) {
+  cat(citation, "\n")
+}
+```
